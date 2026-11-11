@@ -211,6 +211,12 @@ int main(int argc, char **argv) {
     snprintf(p, sizeof p, "%s/shader_map.tsv", dm); if (!stat(p, &st)) setenv("DM_NVN_SHMAP", p, 0);
     snprintf(p, sizeof p, "%s/aoc", res); if (!stat(p, &st)) setenv("DM_AOC_DIR", p, 0);
     snprintf(p, sizeof p, "%s/pso", res); if (!stat(p, &st)) setenv("DM_PSO_BUNDLE", p, 0);   // the bases of every shader pair: the first start builds none
+    {   // Resolution (DM_RES_OVERLAY): the launcher's choice selects the bundled overlay pack romfs_overlay-<scale>, a replacement of the game's resolution table served over the RomFS (hle_fs.c)
+        const char *rs = getenv("DM_RES_OVERLAY"); if (!rs || !*rs) rs = "0.55";
+        snprintf(p, sizeof p, "%s/romfs_overlay-%s", res, rs);
+        if (!stat(p, &st) && S_ISDIR(st.st_mode)) setenv("DM_ROMFS_OVERLAY", p, 0);
+        else fprintf(stderr, "launcher: no overlay for resolution %s at %s (full resolution)\n", rs, p);
+    }
     if (*lang) setenv("DM_LANG", lang, 0);
     setenv("DM_WINDOW", "1", 0); setenv("DM_AUDIO", "1", 0);
     programs_table(contents, res, sup);
