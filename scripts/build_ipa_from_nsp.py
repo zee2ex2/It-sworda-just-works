@@ -2764,6 +2764,15 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
     # The launcher settings the IPA carries (dm/games/settings.py), without the iPhone's own switches: the app's settings window and Mac front ends show them (docs/frontends.md)
     settings = work / 'app/launcher.json'; settings.parent.mkdir(parents=True, exist_ok=True)
     run([py, repo / 'dm/games/settings.py', g.id, patched, control or game / 'control.nacp', settings], logs / 'mac_settings.log', env=dict(env, GFXAPI=gfx, SETTINGS_PLATFORM='mac', DM_LANG=lang))
+    overlays_dir = None   # Ocarina of Time: render-resolution overlay variants the launcher picks from (DM_RES_OVERLAY, launcher.c); generated once, reused
+    if app == 0x0400486024DEC000:
+        overlays_dir = work / 'romfs_overlays'
+        for tag in ('1.0', '0.85', '0.75', '0.667', '0.55', '0.5'):
+            for mode in ('docked', 'handheld'):
+                d = overlays_dir / f'romfs_overlay-{tag}' / mode
+                if (d / 'Pack' / 'Bootup.Nin_Ounce_NVN2.pack.zs').is_file(): continue
+                d.mkdir(parents=True, exist_ok=True)
+                run([py, repo / 'scripts/oot_res_overlay.py', str(rfs.source(game)), str(d), tag, '-', 'flat'], logs / 'mac_overlay.log', env=env)
     cmd = [py, repo / 'dm/mac/pack_app.py', out, '--host', host, '--patched', patched, '--romfs', rfs.source(game), '--msl', lib, '--tables', g.table('shader_map.tsv').parent,
            '--font', font, '--title-id', f'{app:016X}', '--name', name, '--bundle-id', bundle_id, '--lang', lang, '--sign', sign or '-']
     split_pairs = work / 'shader/pso_pairs.tsv'   # the split's copy of pso_pairs.tsv, for a profile without the table (as mac_run's DM_PSO_PAIRS)
@@ -2771,6 +2780,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
                    ('--pso', pso), ('--pso-pairs', split_pairs if gfx == 'nvn' and not g.table('pso_pairs.tsv').is_file() and split_pairs.is_file() else None),
                    ('--env-file', Path(os.path.expanduser(env_file)).resolve() if env_file else None), ('--settings', settings)):
         if v: cmd += [opt, v]
+    if overlays_dir: cmd += ['--romfs-overlays', str(overlays_dir)]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
     unchanged = False

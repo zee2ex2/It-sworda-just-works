@@ -328,6 +328,11 @@ def pack(a):
     if pso: step('pipeline archive'); (res / 'pso').mkdir(); copy(pso, res / 'pso', clone['pso'])
     step('game files'); copy([romfs], res / ('romfs.img' if romfs.is_file() else 'romfs'), clone['romfs'])
     if a.html and Path(a.html).is_dir(): copy([Path(a.html)], res / 'html', False)   # the offline pages, beside the RomFS where the host looks for them (hle_web.c)
+    if a.romfs_overlays:   # render-resolution overlay variants (Resources/romfs_overlay-<scale>); launcher.c maps DM_RES_OVERLAY to one and makes it DM_ROMFS_OVERLAY
+        ov = Path(a.romfs_overlays); step('resolution overlays')
+        for sub in sorted(ov.iterdir()):
+            if sub.is_dir() and sub.name.startswith('romfs_overlay'):
+                copy([sub], res / sub.name, can_clone(sub, res))
     # The other programs: p<N>/ (RomFS, offline pages), msl/p<N>/<library>, dm/p<N>/ (modules, tables), and the table of them all, which the launcher makes DM_PROGRAMS (launcher.c, hle_oe.c): @R@ Resources, @C@ Contents, @S@ the app's Application Support folder
     if programs:
         rows = ['# The programs of this game (dm/mac/pack_app.py; hle_oe.c DM_PROGRAMS)',
@@ -385,6 +390,7 @@ def parse(argv):
     ap.add_argument('--settings', help='the game\'s launcher settings (dm/games/settings.py output; Resources/dm/launcher.json, which the Mac front end reads)')
     ap.add_argument('--title-id', required=True); ap.add_argument('--name', required=True)
     ap.add_argument('--version'); ap.add_argument('--bundle-id'); ap.add_argument('--category'); ap.add_argument('--lang'); ap.add_argument('--marker', help='the profile\'s romfs_marker')
+    ap.add_argument('--romfs-overlays', help='folder of romfs_overlay-<scale>/ variant folders copied into Resources; the launcher picks one by DM_RES_OVERLAY')
     ap.add_argument('--icon', help='the game icon (icon.jpg from the control data)')
     ap.add_argument('--sign', default='-', help='codesign identity (default: - = ad-hoc)')
     return ap.parse_args(argv)
