@@ -31,6 +31,10 @@ Personal fork of [seedds/nxnative](https://github.com/seedds/nxnative), focused 
 - **Frameworks:** Foundation, CoreText, CoreGraphics, ImageIO, Metal, MetalFX, AppKit/SwiftUI.
 - **macOS with Metal ASTC support** (the overlay tool re-encodes ASTC bntx textures on the GPU).
 
+## Contributors
+
+- **DeepSeek** — AI pair-programmer: diagnosis, code changes, build and verification.
+
 ## Build
 
 ```sh
