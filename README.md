@@ -1,6 +1,6 @@
 # It sworda just works
 
-Personal fork of [seedds/nxnative](https://github.com/seedds/nxnative), focused on **The Legend of Zelda: Ocarina of Time** (`0400486024DEC000`, v131072) at 60 fps. Branch: `oot6`.
+Fork of [seedds/nxnative](https://github.com/seedds/nxnative), focused on **The Legend of Zelda: Ocarina of Time** (`0400486024DEC000`, v131072) at 60 fps. Branch: `oot6`.
 
 ## Fixes
 
@@ -38,7 +38,7 @@ Personal fork of [seedds/nxnative](https://github.com/seedds/nxnative), focused 
 ## Build
 
 ```sh
-cd "/Users/aaron/It sworda just works"
+# from the repository root
 .venv/bin/python3 scripts/build_ipa_from_nsp.py \
   "<game>.nup" --platform mac-app \
   --work-dir "<build-dir>" --env-file "<build-dir>/mac_env.txt" \
