@@ -19,6 +19,7 @@ DM_DYNAMIC_RESOLUTION	toggle	-	0	fixups:DYNAMIC_RESOLUTION	Game	Dynamic resoluti
 DM_RENDER_SCALE	range	0.5:1.0:0.05	1.0	fixups:RENDER_SCALE	Game	Render scale		level=basic
 DM_RES_OVERLAY	choice	1.0=Native,0.85=85%,0.75=75%,0.667=67%,0.55=55%,0.5=50%	0.55	fixups:DYNAMIC_RESOLUTION	Game	Resolution	Lower renders fewer pixels: smoother and softer.	level=basic
 DM_OPMODE	choice	1=Docked,0=Handheld	DM_GAME_OPMODE	always	Game	Console mode		level=basic
+DM_PAD_LAYOUT	choice	default=Default,playstation=PlayStation,xbox=Xbox	default	always	Controls	Controller diagrams	Swaps the pause-screen controller art and button glyphs to the selected pad.	level=basic
 DM_PRESENT_UPSCALE	choice	off=Standard,metalfx=MetalFX	off	always	Game	Upscaling	Uses more GPU time and can increase heat.
 DM_UPSCALER	choice	game=Game's own,metalfx=MetalFX	game	DM_GAME_UPSCALER_N!=0	Game	Game's upscaler
 DM_LANG	choice	languages	build:DM_LANG	languages>1	Game	Game language		level=basic

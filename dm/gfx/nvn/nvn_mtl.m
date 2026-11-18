@@ -2494,6 +2494,7 @@ static void count_add(nvn_hmap *m, const void *o, int d) {
 static void held_add(const void *o, int d) { count_add(&g_by_serial_held, o, d); }
 static void ghost_held_add(const void *o, int d) { count_add(&g_ghost_held, o, d); }
 static nvn_hmap g_alias_seen = {.klen = sizeof(alias_key)};   // key → g_fence + 1 at its last lookup or creation (alias_take_over spares entries looked up lately)
+static nvn_hmap g_alias_dirty = {.klen = sizeof(alias_key)};  // storage whose texture may contain GPU-written bytes; do not rebuild it from the pool (pressure trim spares it)
 // Live GPU-only image descriptions, including those not used yet. A dynamic-resolution family declares its largest image before any particular resolution is used.
 // Keeping only descriptions here lets its first allocation cover that family exactly, without allocating every resolution or rounding to a power of two.
 static nvn_hmap g_image_desc = {.klen = 8};   // serial → malloc'ed tex_t, under g_smu
@@ -2536,10 +2537,12 @@ static void retire_resume(const void *o) {   // the last serial entry holding a 
 static void treg_drop_pool_views(const void *pool);
 static void cpu_tex_drop_pool(const void *pool);
 static void gws_drop_pool(const pool_t *p);
+static void drop_serials_naming_locked(const void *pool);   // defined after g_ghost / obj_drop
 void mtl_alias_drop_pool(const void *pool) {
     if (!pool) return;
     pthread_mutex_lock(&g_smu);
     image_desc_drop_pool(pool);
+    drop_serials_naming_locked(pool);
     { uint32_t ns = 0; alias_key *ks = NULL;   // a later pool at this address holds other bytes (g_pkg_share)
         for (uint32_t i = 0; i < g_pkg_share.cap; i++) { if (!g_pkg_share.vals[i]) continue; alias_key k; memcpy(&k, g_pkg_share.keys + (size_t)i * g_pkg_share.klen, sizeof k);
             if (k.pool == (uint64_t)(uintptr_t)pool) { alias_key *nk = realloc(ks, (ns + 1) * sizeof *ks); if (!nk) break; ks = nk; ks[ns++] = k; } }
@@ -2556,6 +2559,7 @@ void mtl_alias_drop_pool(const void *pool) {
         void *old = nvn_hm_del(&g_alias, &ks[j]);
         if (!old) continue;
         nvn_hm_del(&g_alias_seen, &ks[j]);
+        nvn_hm_del(&g_alias_dirty, &ks[j]);
         id o = CFBridgingRelease(old);
         if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
         defer_obj_release(o);
@@ -2601,6 +2605,7 @@ static void alias_take_over(const alias_key *nk) {
         void *old = nvn_hm_del(&g_alias, &ks[j]);
         if (!old) continue;
         nvn_hm_del(&g_alias_seen, &ks[j]);
+        nvn_hm_del(&g_alias_dirty, &ks[j]);
         id o = CFBridgingRelease(old);
         if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
         defer_obj_release(o);
@@ -2627,6 +2632,45 @@ void mtl_tex_init(const tex_t *t) {
     pthread_mutex_unlock(&g_smu);
 }
 static void obj_drop(id o) { if (alias_has(o)) defer_obj_unref(o); else defer_obj_release(o); }   // caller holds g_smu
+// A finalized pool's storage is gone, so the serial entries that still name one of its shared textures (live in g_by_serial, retired ones in g_ghost) must go
+// with it: Ocarina of Time's 12,288² shadow target, rebuilt over a pool every frame, stayed named by 361 live serials and 233 in the ghost ring, holding
+// ~594 MB of its 1.6 GB storage past the pool. A serial may name a view of the texture (an sRGB twin holds the view, not the texture), so the parent chain is
+// followed. Caller holds g_smu; the textures are collected before anything is deleted (deletion shifts the tables' entries)
+static void drop_serials_naming_locked(const void *pool) {
+    uint32_t ng = 0, gc = 0; void **gone = NULL;
+    for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (k.pool != (uint64_t)(uintptr_t)pool) continue;
+        if (ng == gc) { gc = gc ? gc * 2 : 64; void **g = realloc(gone, gc * sizeof *gone); if (!g) break; gone = g; }
+        gone[ng++] = g_alias.vals[i];
+    }
+    if (!ng) { free(gone); return; }
+    nvn_hmap *tables[2] = {&g_by_serial, &g_ghost};
+    uint64_t *ks = NULL; uint32_t n = 0, cap = 0;
+    for (int t = 0; t < 2; t++) {
+        for (uint32_t i = 0; i < tables[t]->cap; i++) {
+            id o = (__bridge id)tables[t]->vals[i]; if (!o) continue;
+            int hit = 0;
+            for (id x = o; x && !hit;) {
+                for (uint32_t j = 0; j < ng; j++) if (gone[j] == (__bridge void *)x) { hit = 1; break; }
+                if (hit || ![x respondsToSelector:@selector(parentTexture)]) break;
+                x = [(id<MTLTexture>)x parentTexture];
+            }
+            if (!hit) continue;
+            if (n == cap) { cap = cap ? cap * 2 : 64; uint64_t *q = realloc(ks, cap * sizeof *ks); if (!q) break; ks = q; }
+            memcpy(&ks[n++], tables[t]->keys + (size_t)i * tables[t]->klen, 8);
+        }
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t k = ks[i];
+        id old = hm_get_id(&g_by_serial, &k);
+        if (old) { held_add((__bridge void *)old, -1); if (alias_has(old)) defer_obj_unref(old); else defer_obj_release(old); hm_del_id(&g_by_serial, &k); ser_note(k); continue; }
+        old = hm_get_id(&g_ghost, &k);
+        if (old) { ghost_held_add((__bridge void *)old, -1); obj_drop(old); hm_del_id(&g_ghost, &k); ser_note(k); }
+    }
+    free(ks); free(gone);
+}
 static void tex_pin_set(tex_pin *pin,id object) { // g_smu held
     id old=(__bridge id)pin->object; if(old==object) return;
     if(old) {
@@ -4015,6 +4059,7 @@ static void gws_set(uintptr_t lo, uintptr_t hi) {   // [lo, hi) becomes one span
     atomic_store(&g_gws_new, 1);
 }
 void mtl_tex_gpu_written(const tex_t *t) {
+    if (t && t->pool) { alias_key ak = tex_alias_key(t); pthread_mutex_lock(&g_smu); if (nvn_hm_get(&g_alias, &ak)) nvn_hm_put(&g_alias_dirty, &ak, (void *)(uintptr_t)1); pthread_mutex_unlock(&g_smu); }
     if (!t || !t->mem || !t->L.size || !t->pool || (t->pool->flags & (NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_VIRTUAL))) {
         return;
     }
@@ -4503,9 +4548,66 @@ static id<MTLTexture> tex_mtl_(const tex_t *ct) {
 // Memory readout line (always on, low frequency, capped): resident memory, GPU allocated, deferred-release queue, residency set object count, registered memory pools / peak / tracking table capacity, cumulative texture re-uploads.
 // Purpose: pin down "crashes with no log". The system gives no notice before killing a process for memory, so only readouts left beforehand can show which number kept climbing.
 // Called by the frame hook every 300 frames; printed only when resident or GPU allocated changed by ≥ 64 MB since the last line, otherwise one line every 3000 frames; capped at 400 lines per game. All integers (the frame hook runs on the guest thread's small stack, so no floating-point formatting)
+typedef struct { alias_key key; uint64_t seen, bytes; } trim_cand;
+static int trim_cmp(const void *a, const void *b) { const trim_cand *x = a, *y = b; return x->seen < y->seen ? -1 : x->seen > y->seen; }
+// Retire the oldest shared textures no live or ghost serial resolves to, a leaf the GPU has not written and that is not a render target or shader-write image, idle for at least
+// idle_submissions. Called under memory pressure: these are cache-only — nothing names them, so they can only be rebuilt from pool storage — and the oldest go first until need_bytes
+// is covered. Caller holds g_smu; returns the number of textures removed
+static uint32_t alias_trim_locked(uint64_t now, uint64_t idle_submissions, uint64_t need_bytes, uint64_t *estimated_bytes) {
+    if (estimated_bytes) *estimated_bytes = 0;
+    if (!need_bytes || !g_alias.n) return 0;
+    CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL), selected = CFSetCreateMutable(NULL, 0, NULL), blocked = CFSetCreateMutable(NULL, 0, NULL);
+    for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) CFSetAddValue(held, g_by_serial.vals[i]);
+    for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) CFSetAddValue(held, g_ghost.vals[i]);
+    trim_cand *v = malloc((size_t)g_alias.n * sizeof *v); uint32_t n = 0;
+    if (v) for (uint32_t i = 0; i < g_alias.cap; i++) {
+        if (!g_alias.vals[i]) continue;
+        id<MTLTexture> t = (__bridge id<MTLTexture>)g_alias.vals[i];
+        alias_key k; memcpy(&k, g_alias.keys + (size_t)i * g_alias.klen, sizeof k);
+        if (CFSetContainsValue(held, g_alias.vals[i]) || tex_object_pinned(t) || (t.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite)) || nvn_hm_get(&g_alias_dirty, &k)) { CFSetAddValue(blocked, g_alias.vals[i]); continue; }
+        uint64_t seen = (uint64_t)(uintptr_t)nvn_hm_get(&g_alias_seen, &k);
+        if (!seen || now <= seen || now - seen < idle_submissions) { CFSetAddValue(blocked, g_alias.vals[i]); continue; }
+        if (CFSetContainsValue(selected, g_alias.vals[i])) continue;
+        CFSetAddValue(selected, g_alias.vals[i]);
+        v[n++] = (trim_cand){.key = k, .seen = seen, .bytes = t.allocatedSize};
+    }
+    CFRelease(selected); CFRelease(held);
+    qsort(v, n, sizeof *v, trim_cmp);
+    uint32_t dropped = 0; uint64_t bytes = 0;
+    for (uint32_t i = 0; v && i < n && bytes < need_bytes; i++) {
+        id object = hm_get_id(&g_alias, &v[i].key);
+        if (!object || CFSetContainsValue(blocked, (__bridge const void *)object)) continue;
+        alias_key *keys = malloc((size_t)g_alias.n * sizeof *keys); if (!keys) continue;
+        uint32_t nk = 0;
+        for (uint32_t j = 0; j < g_alias.cap; j++) if (g_alias.vals[j] == (__bridge void *)object) memcpy(&keys[nk++], g_alias.keys + (size_t)j * g_alias.klen, sizeof keys[0]);
+        uint32_t removed = 0;
+        for (uint32_t j = 0; j < nk; j++) {
+            void *old = nvn_hm_del(&g_alias, &keys[j]); if (!old) continue;
+            nvn_hm_del(&g_alias_seen, &keys[j]); nvn_hm_del(&g_alias_dirty, &keys[j]);
+            id o = CFBridgingRelease(old); if (g_alias_set) CFSetRemoveValue(g_alias_set, (__bridge const void *)o);
+            defer_obj_release(o); removed++;
+        }
+        free(keys);
+        if (removed) { dropped++; bytes += v[i].bytes; }
+    }
+    CFRelease(blocked); free(v);
+    if (estimated_bytes) *estimated_bytes = bytes;
+    return dropped;
+}
 void mtl_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     static unsigned long long last_rss, last_gpu, last_frame; static int lines; unsigned long long gpu = (unsigned long long)(g_dev.currentAllocatedSize >> 20);
     unsigned long long dr = rss_mb > last_rss ? rss_mb - last_rss : last_rss - rss_mb, dg = gpu > last_gpu ? gpu - last_gpu : last_gpu - gpu;
+#if TARGET_OS_OSX
+    // macOS has no os_proc_available_memory(). When the process reaches 75% of physical RAM, retire old cache-only read textures until its footprint is back below 65%
+    static uint64_t physical_mb; if (!physical_mb) { uint64_t b = 0; size_t z = sizeof b; if (!sysctlbyname("hw.memsize", &b, &z, NULL, 0)) physical_mb = b >> 20; }
+    if (physical_mb && rss_mb > physical_mb * 3 / 4) {
+        uint64_t target_mb = physical_mb * 13 / 20, retired_bytes = 0, need = (rss_mb - target_mb) << 20;
+        pthread_mutex_lock(&g_smu);
+        uint32_t ntrim = alias_trim_locked(g_fence + 1, 4096, need, &retired_bytes);
+        pthread_mutex_unlock(&g_smu);
+        if (ntrim) MLOG("memory pressure: retired %u idle cache-only read textures (~%llu MB estimated); footprint %llu MB, target %llu MB", ntrim, (unsigned long long)(retired_bytes >> 20), rss_mb, (unsigned long long)target_mb);
+    }
+#endif
     if (lines >= 400 || (lines && dr < 64 && dg < 64 && frame - last_frame < 3000)) return; lines++; last_rss = rss_mb; last_gpu = gpu; last_frame = frame;
     pthread_mutex_lock(&g_deferred_mu); unsigned long nd = (unsigned long)g_deferred.count; pthread_mutex_unlock(&g_deferred_mu);
     pthread_mutex_lock(&g_res_mu); unsigned long nr = (unsigned long)g_res_objects.count; pthread_mutex_unlock(&g_res_mu);

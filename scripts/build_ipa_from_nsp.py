@@ -2748,6 +2748,18 @@ def mac_pso(py, repo, work, lib, g, gpus, env, logs):
     return out
 
 
+def mac_pad_overlays(py, repo, work, game, g, env, logs):
+    """For Ocarina of Time (0400486024DEC000), generate overlay_playstation/ and overlay_xbox/ in <id>_build/ from the extracted RomFS so DM_PAD_LAYOUT=playstation|xbox swaps the controller
+    diagrams and external glyph font. Both are packed under Resources/dm/ (pack_app --overlay) and the launcher puts the chosen one in DM_ROMFS_OVERLAY"""
+    if g.id != '0400486024DEC000' or not (repo / 'scripts/oot_pad_overlay.py').is_file(): return ()
+    romfs = Path(rfs.source(game))
+    if not romfs.exists(): return ()
+    ps, xb = work / 'overlay_playstation', work / 'overlay_xbox'
+    if not (ps.is_dir() and xb.is_dir()):
+        run([py, repo / 'scripts/oot_pad_overlay.py', romfs, work], logs / 'oot_pad_overlay.log', env=env)
+    return tuple(p for p in (ps, xb) if p.is_dir())
+
+
 def mac_app_name(name):   # the app's file name: the game name with the characters Finder shows otherwise (':' and '/') as ' - '
     return re.sub(r'\s*[:/]\s*', ' - ', name).strip(' .-') or 'nxnative'
 
@@ -2782,6 +2794,7 @@ def mac_app(py, repo, out, app, work, game, patched, host, font, msl, aoc, gfx, 
         if v: cmd += [opt, v]
     if overlays_dir: cmd += ['--romfs-overlays', str(overlays_dir)]
     for n, r in (programs or {}).items(): cmd += ['--program', f'{n}\t{r["patched"]}\t{r["romfs"]}\t{r["msl"]}\t{r["tables"]}\t{r["html"]}']
+    for ov in mac_pad_overlays(py, repo, work, game, g, env, logs): cmd += ['--overlay', str(ov)]
     if (game / 'html').is_dir(): cmd += ['--html', game / 'html']
     unchanged = False
     def line(ln):
